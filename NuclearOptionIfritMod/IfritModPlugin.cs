@@ -21,7 +21,9 @@ namespace NuclearOptionIfritMod
         internal const float ScramjetMinMach = 4.5f;
         internal const float ScramjetMinAltM = 60000f * 0.3048f;
         internal const float ScramjetThrustPerEngine = 500000f;
+        internal const float FlameoutAltM = 164000f * 0.3048f;
         internal static bool scramjetActive = false;
+        internal static bool flameout = false;
         internal const string OriginalName = "Multirole1";
         internal const string CloneJsonKey = "Multirole1X";
         internal const string CloneUnitName = "KR-67X SuperIfrit";
@@ -85,8 +87,10 @@ namespace NuclearOptionIfritMod
             private static readonly FieldInfo maxSpeedField = AccessTools.Field(typeof(Turbojet), "maxSpeed");
             private static readonly FieldInfo minDensityField = AccessTools.Field(typeof(Turbojet), "minDensity");
             private static readonly FieldInfo altThrustField = AccessTools.Field(typeof(Turbojet), "altitudeThrust");
+            private static readonly FieldInfo thrustField = AccessTools.Field(typeof(Turbojet), "thrust");
             private static readonly HashSet<int> logged = new HashSet<int>();
             private static bool wasScramjet = false;
+            private static bool wasFlameout = false;
 
             public static void Prefix(Turbojet __instance)
             {
@@ -94,6 +98,28 @@ namespace NuclearOptionIfritMod
                 if (!IsIfritX(aircraft)) return;
                 int id = __instance.GetInstanceID();
                 bool first = !logged.Contains(id);
+
+                float altMeters = __instance.transform.position.y - Datum.originPosition.y;
+                flameout = altMeters >= FlameoutAltM;
+
+                if (flameout)
+                {
+                    __instance.maxThrust = 0f;
+                    if (minDensityField != null) minDensityField.SetValue(__instance, 999f);
+                    if (flameout != wasFlameout)
+                    {
+                        Log.LogInfo("[Flameout] Engine flameout at " + altMeters.ToString("F0") + "m (" + (altMeters / 0.3048f).ToString("F0") + "ft)");
+                        wasFlameout = flameout;
+                    }
+                    if (first) logged.Add(id);
+                    return;
+                }
+                if (flameout != wasFlameout)
+                {
+                    Log.LogInfo("[Flameout] Engine relight at " + altMeters.ToString("F0") + "m (" + (altMeters / 0.3048f).ToString("F0") + "ft)");
+                    wasFlameout = flameout;
+                }
+
                 float targetThrust = scramjetActive ? ScramjetThrustPerEngine : DoubledMaxThrust;
                 if (Math.Abs(__instance.maxThrust - targetThrust) > 1f)
                 {
@@ -124,6 +150,14 @@ namespace NuclearOptionIfritMod
                 var aircraft = aircraftField?.GetValue(__instance) as Aircraft;
                 if (!IsIfritX(aircraft)) return;
                 float altMeters = __instance.transform.position.y - Datum.originPosition.y;
+
+                if (flameout)
+                {
+                    scramjetActive = false;
+                    if (thrustField != null) thrustField.SetValue(__instance, 0f);
+                    return;
+                }
+
                 float speed = aircraft.speed;
                 float sos = Mathf.Max(-0.005f * altMeters + 340f, 290f);
                 float mach = speed / sos;
@@ -148,10 +182,12 @@ namespace NuclearOptionIfritMod
             private static readonly FieldInfo nozzleAircraftField = AccessTools.Field(typeof(JetNozzle), "aircraft");
             private static readonly HashSet<int> loggedPre = new HashSet<int>();
 
+
             public static void Prefix(JetNozzle __instance)
             {
                 var aircraft = nozzleAircraftField?.GetValue(__instance) as Aircraft;
                 if (!IsIfritX(aircraft)) return;
+                if (flameout) return;
                 int id = __instance.GetInstanceID();
                 bool first = !loggedPre.Contains(id);
                 if (abField == null || abThrustField == null) return;
@@ -170,6 +206,7 @@ namespace NuclearOptionIfritMod
             {
                 var aircraft = nozzleAircraftField?.GetValue(__instance) as Aircraft;
                 if (!IsIfritX(aircraft)) return;
+                if (flameout) return;
                 float density = aircraft.airDensity;
                 if (density >= 0.4f) return;
                 if (abField == null || totalThrustField == null) return;
