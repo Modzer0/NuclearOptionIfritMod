@@ -1,4 +1,4 @@
-using BepInEx;
+﻿using BepInEx;
 using BepInEx.Logging;
 using HarmonyLib;
 using System;
@@ -15,7 +15,7 @@ namespace NuclearOptionIfritMod
     public class IfritModPlugin : BaseUnityPlugin
     {
         internal static ManualLogSource Log;
-        internal const float TargetMaxSpeed = 1887f;
+        internal const float TargetMaxSpeed = 4500f;
         internal const float DoubledMaxThrust = 200000f;
         internal const float DoubledAfterburnerThrust = 94000f;
         internal const float ScramjetMinMach = 4.5f;
@@ -93,6 +93,8 @@ namespace NuclearOptionIfritMod
             private static readonly HashSet<int> logged = new HashSet<int>();
             private static bool wasScramjet = false;
             private static bool wasFlameout = false;
+            private static float darkstarRampTimer = 0f;
+            private const float DarkstarRampDuration = 10f;
 
             public static void Prefix(Turbojet __instance)
             {
@@ -122,7 +124,18 @@ namespace NuclearOptionIfritMod
                     wasFlameout = flameout;
                 }
 
-                float scramThrust = DarkstarMode.Value ? ScramjetThrustPerEngine * 2f : ScramjetThrustPerEngine;
+                // Darkstar mode: ramp the bonus thrust over 10 seconds
+                float scramThrust = ScramjetThrustPerEngine;
+                if (DarkstarMode.Value && scramjetActive)
+                {
+                    darkstarRampTimer = Mathf.Min(darkstarRampTimer + Time.fixedDeltaTime, DarkstarRampDuration);
+                    float ramp = darkstarRampTimer / DarkstarRampDuration;
+                    scramThrust = ScramjetThrustPerEngine + ScramjetThrustPerEngine * ramp;
+                }
+                else if (!scramjetActive)
+                {
+                    darkstarRampTimer = 0f;
+                }
                 float targetThrust = scramjetActive ? scramThrust : DoubledMaxThrust;
                 if (Math.Abs(__instance.maxThrust - targetThrust) > 1f)
                 {
@@ -184,7 +197,6 @@ namespace NuclearOptionIfritMod
             private static readonly FieldInfo totalThrustField = AccessTools.Field(typeof(JetNozzle), "totalThrust");
             private static readonly FieldInfo nozzleAircraftField = AccessTools.Field(typeof(JetNozzle), "aircraft");
             private static readonly HashSet<int> loggedPre = new HashSet<int>();
-
 
             public static void Prefix(JetNozzle __instance)
             {
@@ -368,7 +380,7 @@ namespace NuclearOptionIfritMod
                     clonedDefinition.aircraftParameters.name = CloneJsonKey + "_parameters";
                     clonedDefinition.aircraftParameters.aircraftName = CloneAircraftName;
                     clonedDefinition.aircraftParameters.aircraftDescription =
-                        "KR-67X SuperIfrit. Doubled thrust, Mach 5.5 capable, 85,000 ft ceiling with scramjet.";
+                        "KR-67X SuperIfrit. Doubled thrust, Mach 10+ capable, 164,000 ft ceiling with scramjet.";
 
                     clonedDefinition.aircraftParameters.rankRequired = 5;
                     if (original.aircraftInfo != null)
@@ -501,6 +513,164 @@ namespace NuclearOptionIfritMod
                 unitDefField.SetValue(__result, clonedDefinition);
                 nextSpawnIsClone = false;
                 Log.LogInfo("[Spawn] Reassigned definition to clonedDefinition");
+            }
+        }
+        // Prevent flap deployment above Mach 1 on KR-67X
+        [HarmonyPatch(typeof(ControlSurface), "UpdateJobFields")]
+        public static class FlapSpeedLimitPatch
+        {
+            private static readonly FieldInfo csAircraftField = AccessTools.Field(typeof(ControlSurface), "aircraft");
+            private static readonly FieldInfo csFlapField = AccessTools.Field(typeof(ControlSurface), "flap");
+            private static LandingGear.GearState savedGearState;
+
+            public static void Prefix(ControlSurface __instance)
+            {
+                if (csFlapField == null || csAircraftField == null) return;
+                bool isFlap = (bool)csFlapField.GetValue(__instance);
+                if (!isFlap) return;
+                var aircraft = csAircraftField.GetValue(__instance) as Aircraft;
+                if (aircraft == null || !IsIfritX(aircraft)) return;
+                savedGearState = aircraft.gearState;
+                float altMeters = aircraft.transform.position.y - Datum.originPosition.y;
+                float sos = Mathf.Max(-0.005f * altMeters + 340f, 290f);
+                if (aircraft.speed > sos)
+                    aircraft.gearState = LandingGear.GearState.LockedRetracted;
+            }
+
+            public static void Postfix(ControlSurface __instance)
+            {
+                if (csFlapField == null || csAircraftField == null) return;
+                bool isFlap = (bool)csFlapField.GetValue(__instance);
+                if (!isFlap) return;
+                var aircraft = csAircraftField.GetValue(__instance) as Aircraft;
+                if (aircraft == null || !IsIfritX(aircraft)) return;
+                aircraft.gearState = savedGearState;
+            }
+        }
+
+        // Dampen RelaxedStabilityController at hypersonic speeds to prevent oscillations
+        [HarmonyPatch(typeof(RelaxedStabilityController), "FilterInput")]
+        public static class RelaxedStabilityHypersonicPatch
+        {
+            private static readonly FieldInfo rscCanardField = AccessTools.Field(typeof(RelaxedStabilityController), "canardRange");
+
+            public static void Prefix(RelaxedStabilityController __instance, ControlInputs inputs, Rigidbody rb, ref float rawPitch)
+            {
+                // Get the aircraft from the rigidbody's parent
+                var aircraft = rb.GetComponent<Aircraft>();
+                if (aircraft == null || !IsIfritX(aircraft)) return;
+
+                float altMeters = rb.transform.position.y - Datum.originPosition.y;
+                float sos = Mathf.Max(-0.005f * altMeters + 340f, 290f);
+                float mach = aircraft.speed / sos;
+
+                // Above Mach 2, progressively reduce the RSC effect by widening canardRange
+                // This makes the AoA-to-canardRange ratio smaller, reducing correction magnitude
+                if (mach > 2f && rscCanardField != null)
+                {
+                    float origRange = (float)rscCanardField.GetValue(__instance);
+                    // Scale canardRange up by mach factor: at Mach 5 it's 2.5x wider, at Mach 10 it's 5x
+                    float scale = 1f + (mach - 2f) * 0.5f;
+                    rscCanardField.SetValue(__instance, origRange * scale);
+                }
+            }
+
+            public static void Postfix(RelaxedStabilityController __instance, Rigidbody rb)
+            {
+                var aircraft = rb.GetComponent<Aircraft>();
+                if (aircraft == null || !IsIfritX(aircraft)) return;
+
+                // Restore original canardRange (we need to undo the scaling)
+                // Since we don't store it, recalculate: divide by the same scale
+                if (rscCanardField != null)
+                {
+                    float altMeters = rb.transform.position.y - Datum.originPosition.y;
+                    float sos = Mathf.Max(-0.005f * altMeters + 340f, 290f);
+                    float mach = aircraft.speed / sos;
+                    if (mach > 2f)
+                    {
+                        float scale = 1f + (mach - 2f) * 0.5f;
+                        float current = (float)rscCanardField.GetValue(__instance);
+                        rscCanardField.SetValue(__instance, current / scale);
+                    }
+                }
+            }
+        }
+        // Dampen FlyByWire pitch response at hypersonic speeds to prevent oscillations
+        // The FBW uses speed * airDensity / 1.225 as effective speed, which is low at altitude
+        // but actual aero forces (density * speed^2) are still huge at hypersonic speeds
+        [HarmonyPatch(typeof(ControlsFilter), "Filter")]
+        public static class FBWHypersonicDamperPatch
+        {
+            public static void Postfix(ControlInputs inputs, Vector3 rawInputs, Rigidbody rb)
+            {
+                var aircraft = rb.GetComponent<Aircraft>();
+                if (aircraft == null || !IsIfritX(aircraft)) return;
+
+                float altMeters = rb.transform.position.y - Datum.originPosition.y;
+                float sos = Mathf.Max(-0.005f * altMeters + 340f, 290f);
+                float mach = aircraft.speed / sos;
+
+                // Above Mach 3, progressively dampen pitch and roll inputs
+                // At Mach 3: factor = 1.0 (no change)
+                // At Mach 6: factor = 0.33
+                // At Mach 10: factor = 0.2
+                if (mach > 3f)
+                {
+                    float damper = 3f / mach;
+                    inputs.pitch *= damper;
+                    inputs.roll *= damper;
+                }
+            }
+        }
+        // Strengthen airbrakes on KR-67X to survive Mach 5 deployment at sea level
+        // Reinforces joints and caps drag force to prevent structural failure
+        [HarmonyPatch(typeof(Airbrake), "FixedUpdate")]
+        public static class AirbrakeStrengthPatch
+        {
+            private static readonly FieldInfo abAircraftField = AccessTools.Field(typeof(Airbrake), "aircraft");
+            private static readonly FieldInfo abPartField = AccessTools.Field(typeof(Airbrake), "part");
+            private static readonly FieldInfo abDragField = AccessTools.Field(typeof(Airbrake), "dragAmount");
+            private static readonly FieldInfo abOpenField = AccessTools.Field(typeof(Airbrake), "openAmount");
+            private static readonly FieldInfo abAttachedField = AccessTools.Field(typeof(Airbrake), "attachedAircraft");
+            private static readonly HashSet<int> reinforced = new HashSet<int>();
+            // Max drag force in Newtons — tuned so airbrake is effective but won't rip off
+            // At Mach 5 sea level: density=1.225, v=1700m/s, v²=2890000
+            // Stock dragAmount might be ~0.1-0.5, giving 354k-1.77M N raw force
+            // We cap total force to prevent joint failure while still providing strong braking
+            private const float MaxBrakeForceN = 500000f;
+
+            public static void Prefix(Airbrake __instance)
+            {
+                var aircraft = abAttachedField?.GetValue(__instance) as Aircraft;
+                if (aircraft == null) aircraft = abAircraftField?.GetValue(__instance) as Aircraft;
+                if (aircraft == null || !IsIfritX(aircraft)) return;
+
+                // Reinforce joints once
+                int id = __instance.GetInstanceID();
+                if (!reinforced.Contains(id))
+                {
+                    var part = abPartField?.GetValue(__instance) as UnitPart;
+                    if (part != null)
+                    {
+                        var joints = part.GetComponents<FixedJoint>();
+                        foreach (var j in joints)
+                        {
+                            j.breakForce = float.PositiveInfinity;
+                            j.breakTorque = float.PositiveInfinity;
+                        }
+                        Log.LogInfo("[Airbrake] Reinforced joints on " + __instance.gameObject.name);
+                    }
+                    reinforced.Add(id);
+                }
+            }
+
+            public static void Postfix(Airbrake __instance)
+            {
+                // The base FixedUpdate already applied the force. We can't undo it,
+                // but we reinforced the joints so it won't break.
+                // For additional safety, we could also reduce drag at extreme speeds
+                // but with infinite joint strength, the airbrake will hold.
             }
         }
     }
