@@ -32,9 +32,11 @@ namespace NuclearOptionIfritMod
         internal static AircraftDefinition clonedDefinition = null;
         internal static AircraftDefinition originalDefinition = null;
         internal static bool nextSpawnIsClone = false;
+        internal static BepInEx.Configuration.ConfigEntry<bool> DarkstarMode;
         private void Awake()
         {
             Log = Logger;
+            DarkstarMode = Config.Bind("General", "Darkstar Mode", false, "Double scramjet thrust when enabled.");
             var harmony = new Harmony("com.custom.ifritmod");
             harmony.PatchAll();
             try
@@ -120,7 +122,8 @@ namespace NuclearOptionIfritMod
                     wasFlameout = flameout;
                 }
 
-                float targetThrust = scramjetActive ? ScramjetThrustPerEngine : DoubledMaxThrust;
+                float scramThrust = DarkstarMode.Value ? ScramjetThrustPerEngine * 2f : ScramjetThrustPerEngine;
+                float targetThrust = scramjetActive ? scramThrust : DoubledMaxThrust;
                 if (Math.Abs(__instance.maxThrust - targetThrust) > 1f)
                 {
                     if (first) Log.LogInfo(__instance.gameObject.name + " maxThrust -> " + targetThrust);
