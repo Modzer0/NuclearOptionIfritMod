@@ -1,4 +1,4 @@
-﻿using BepInEx;
+using BepInEx;
 using BepInEx.Logging;
 using HarmonyLib;
 using System;
@@ -33,10 +33,12 @@ namespace NuclearOptionIfritMod
         internal static AircraftDefinition originalDefinition = null;
         internal static bool nextSpawnIsClone = false;
         internal static BepInEx.Configuration.ConfigEntry<bool> DarkstarMode;
+        internal static BepInEx.Configuration.ConfigEntry<float> ScimitarThrust;
         private void Awake()
         {
             Log = Logger;
             DarkstarMode = Config.Bind("General", "Darkstar Mode", false, "Double scramjet thrust when enabled.");
+            ScimitarThrust = Config.Bind("Weapons", "Scimitar Thrust kN", 0f, "Override Scimitar motor thrust in kN. 0 = stock, 5000 = 5000kN.");
             var harmony = new Harmony("com.custom.ifritmod");
             harmony.PatchAll();
             try
@@ -671,6 +673,40 @@ namespace NuclearOptionIfritMod
                 // but we reinforced the joints so it won't break.
                 // For additional safety, we could also reduce drag at extreme speeds
                 // but with infinite joint strength, the airbrake will hold.
+            }
+        }
+        // Override Scimitar missile motor thrust if configured
+        [HarmonyPatch(typeof(Missile), "MotorThrust")]
+        public static class ScimitarThrustPatch
+        {
+            private static readonly FieldInfo missileInfoField = AccessTools.Field(typeof(Missile), "info");
+            private static readonly FieldInfo missileMotorsField = AccessTools.Field(typeof(Missile), "motors");
+            private static readonly Type motorType = typeof(Missile).GetNestedType("Motor", BindingFlags.NonPublic);
+            private static readonly FieldInfo motorThrustField = motorType != null ? AccessTools.Field(motorType, "thrust") : null;
+            private static readonly HashSet<int> patched = new HashSet<int>();
+
+            public static void Prefix(Missile __instance)
+            {
+                if (ScimitarThrust == null || ScimitarThrust.Value <= 0f) return;
+                int id = __instance.GetInstanceID();
+                if (patched.Contains(id)) return;
+
+                var info = missileInfoField?.GetValue(__instance) as WeaponInfo;
+                if (info == null || info.weaponName == null) return;
+                if (info.weaponName.IndexOf("Scimitar", StringComparison.OrdinalIgnoreCase) < 0 && info.weaponName.IndexOf("AAM-36", StringComparison.OrdinalIgnoreCase) < 0) return;
+
+                if (missileMotorsField == null || motorThrustField == null) return;
+                var motors = missileMotorsField.GetValue(__instance) as Array;
+                if (motors == null) return;
+
+                float thrustN = ScimitarThrust.Value * 1000f; // config is in kN
+                foreach (var motor in motors)
+                {
+                    float old = (float)motorThrustField.GetValue(motor);
+                    motorThrustField.SetValue(motor, thrustN);
+                    Log.LogInfo("[Scimitar] Motor thrust: " + old + " -> " + thrustN + "N");
+                }
+                patched.Add(id);
             }
         }
     }
