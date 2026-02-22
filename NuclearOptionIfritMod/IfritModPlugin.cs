@@ -7,6 +7,7 @@ using System.Linq;
 using System.Reflection;
 using UnityEngine;
 using UnityEngine.UI;
+using NuclearOption.MissionEditorScripts.Buttons;
 
 namespace NuclearOptionIfritMod
 {
@@ -707,6 +708,95 @@ namespace NuclearOptionIfritMod
                     Log.LogInfo("[Scimitar] Motor thrust: " + old + " -> " + thrustN + "N");
                 }
                 patched.Add(id);
+            }
+        }
+        // Inject KR-67X into mission editor by clearing the static unit provider cache
+        // so NewUnitPanel rebuilds it with our clone included from Encyclopedia.aircraft
+        [HarmonyPatch(typeof(NewUnitPanel), "Awake")]
+        public static class MissionEditorInjectPatch
+        {
+            private static readonly FieldInfo unitProvidersField =
+                AccessTools.Field(typeof(NewUnitPanel), "unitProviders");
+
+            public static void Prefix()
+            {
+                // Clear the static cache so it rebuilds with our clone in Encyclopedia.aircraft
+                if (unitProvidersField != null)
+                {
+                    var dict = unitProvidersField.GetValue(null) as System.Collections.IDictionary;
+                    if (dict != null && dict.Count > 0)
+                    {
+                        dict.Clear();
+                        Log.LogInfo("[Editor] Cleared unitProviders cache for KR-67X injection");
+                    }
+                }
+
+                // Ensure clone exists in Encyclopedia before the panel rebuilds
+                if (clonedDefinition == null)
+                {
+                    try
+                    {
+                        var enc = Encyclopedia.i;
+                        if (enc != null && enc.aircraft != null && enc.aircraft.Count > 0)
+                            EncyclopediaClonePatch.Postfix(enc);
+                    }
+                    catch { }
+                }
+            }
+        }
+
+        // Scale Scimitar missile torque and maxTurnRate when thrust is overridden
+        // so the missile can still track targets at much higher speeds
+        [HarmonyPatch(typeof(Missile), "StartMissile")]
+        public static class ScimitarGuidancePatch
+        {
+            private static readonly FieldInfo missileInfoField = AccessTools.Field(typeof(Missile), "info");
+            private static readonly FieldInfo missileTorqueField = AccessTools.Field(typeof(Missile), "torque");
+            private static readonly FieldInfo missileMaxTurnField = AccessTools.Field(typeof(Missile), "maxTurnRate");
+            private static readonly FieldInfo missileMotorsField = AccessTools.Field(typeof(Missile), "motors");
+            private static readonly Type motorType = typeof(Missile).GetNestedType("Motor", BindingFlags.NonPublic);
+            private static readonly FieldInfo motorThrustField = motorType != null ? AccessTools.Field(motorType, "thrust") : null;
+
+            public static void Postfix(Missile __instance)
+            {
+                if (ScimitarThrust == null || ScimitarThrust.Value <= 0f) return;
+
+                var info = missileInfoField?.GetValue(__instance) as WeaponInfo;
+                if (info == null || info.weaponName == null) return;
+                if (info.weaponName.IndexOf("Scimitar", StringComparison.OrdinalIgnoreCase) < 0
+                    && info.weaponName.IndexOf("AAM-36", StringComparison.OrdinalIgnoreCase) < 0) return;
+
+                // Calculate thrust ratio to scale guidance proportionally
+                float targetThrustN = ScimitarThrust.Value * 1000f;
+                if (missileMotorsField == null || motorThrustField == null) return;
+                var motors = missileMotorsField.GetValue(__instance) as Array;
+                if (motors == null || motors.Length == 0) return;
+                float stockThrust = (float)motorThrustField.GetValue(motors.GetValue(0));
+                if (stockThrust <= 0f) stockThrust = 1f;
+                float thrustRatio = targetThrustN / stockThrust;
+
+                // Scale torque by sqrt of thrust ratio — more torque for faster turning
+                // but not linearly, since aero forces also help at higher speed
+                if (missileTorqueField != null)
+                {
+                    float oldTorque = (float)missileTorqueField.GetValue(__instance);
+                    float newTorque = oldTorque * Mathf.Sqrt(thrustRatio);
+                    missileTorqueField.SetValue(__instance, newTorque);
+                    Log.LogInfo("[Scimitar] Torque: " + oldTorque + " -> " + newTorque);
+                }
+
+                // Scale maxTurnRate — allow wider PID steering commands
+                if (missileMaxTurnField != null)
+                {
+                    float oldRate = (float)missileMaxTurnField.GetValue(__instance);
+                    float newRate = oldRate * Mathf.Sqrt(thrustRatio);
+                    missileMaxTurnField.SetValue(__instance, newRate);
+                    // Also update the PID pLimit which was set from maxTurnRate in StartMissile
+                    __instance.SetTorque(
+                        (float)missileTorqueField.GetValue(__instance),
+                        newRate);
+                    Log.LogInfo("[Scimitar] MaxTurnRate: " + oldRate + " -> " + newRate);
+                }
             }
         }
     }
