@@ -815,7 +815,10 @@ namespace NuclearOptionIfritMod
                 // Double the radar max range
                 float oldRange = __instance.RadarParameters.maxRange;
                 __instance.RadarParameters.maxRange = oldRange * 2f;
-                Log.LogInfo("[Radar] KR-67X radar range: " + oldRange + " -> " + __instance.RadarParameters.maxRange);
+                // Double radar signal strength for better detection through clutter/jamming
+                float oldSignal = __instance.RadarParameters.maxSignal;
+                __instance.RadarParameters.maxSignal = oldSignal * 2f;
+                Log.LogInfo("[Radar] KR-67X radar range: " + oldRange + " -> " + __instance.RadarParameters.maxRange + ", signal: " + oldSignal + " -> " + __instance.RadarParameters.maxSignal);
             }
         }
     }
