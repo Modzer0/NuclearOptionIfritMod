@@ -1,4 +1,4 @@
-using BepInEx;
+﻿using BepInEx;
 using BepInEx.Logging;
 using HarmonyLib;
 using System;
@@ -797,6 +797,25 @@ namespace NuclearOptionIfritMod
                         newRate);
                     Log.LogInfo("[Scimitar] MaxTurnRate: " + oldRate + " -> " + newRate);
                 }
+            }
+        }
+        // Double radar range on KR-67X
+        [HarmonyPatch(typeof(Radar), "Awake")]
+        public static class RadarRangePatch
+        {
+            private static readonly FieldInfo radarUnitField = AccessTools.Field(typeof(TargetDetector), "attachedUnit");
+
+            public static void Postfix(Radar __instance)
+            {
+                var unit = radarUnitField?.GetValue(__instance) as Unit;
+                if (unit == null) return;
+                var aircraft = unit as Aircraft;
+                if (aircraft == null || !IsIfritX(aircraft)) return;
+
+                // Double the radar max range
+                float oldRange = __instance.RadarParameters.maxRange;
+                __instance.RadarParameters.maxRange = oldRange * 2f;
+                Log.LogInfo("[Radar] KR-67X radar range: " + oldRange + " -> " + __instance.RadarParameters.maxRange);
             }
         }
     }
