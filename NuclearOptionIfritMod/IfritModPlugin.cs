@@ -62,18 +62,32 @@ namespace NuclearOptionIfritMod
             Log.LogInfo("Ifrit Override Mod loaded.");
         }
 
+        // Identifies KR-67X aircraft by definition, jsonKey, aircraft name, or synced unitName.
+        // The unitName fallback is critical for multiplayer: remote clients receive the
+        // original Ifrit prefab (definition not reassigned), but the unitName SyncVar
+        // contains "KR-67X" and is synced to all clients.
         private static bool IsIfritX(Aircraft aircraft)
         {
             if (aircraft == null) return false;
             try
             {
                 var def = aircraft.definition;
-                if (def == null) return false;
-                if (clonedDefinition != null && def == clonedDefinition) return true;
-                if (def.jsonKey == CloneJsonKey) return true;
-                var parms = def.aircraftParameters;
-                return parms != null && parms.aircraftName != null &&
-                       parms.aircraftName.IndexOf("KR-67X", StringComparison.OrdinalIgnoreCase) >= 0;
+                if (def != null)
+                {
+                    if (clonedDefinition != null && def == clonedDefinition) return true;
+                    if (def.jsonKey == CloneJsonKey) return true;
+                    var parms = def.aircraftParameters;
+                    if (parms != null && parms.aircraftName != null &&
+                        parms.aircraftName.IndexOf("KR-67X", StringComparison.OrdinalIgnoreCase) >= 0)
+                        return true;
+                }
+                // Fallback: check the network-synced unitName for multiplayer remote clients
+                // where the definition field still points to the original Ifrit prefab
+                var syncedName = aircraft.unitName;
+                if (syncedName != null &&
+                    syncedName.IndexOf("KR-67X", StringComparison.OrdinalIgnoreCase) >= 0)
+                    return true;
+                return false;
             }
             catch { return false; }
         }
@@ -518,6 +532,34 @@ namespace NuclearOptionIfritMod
                 Log.LogInfo("[Spawn] Reassigned definition to clonedDefinition");
             }
         }
+
+        // Multiplayer fix: on remote clients, the spawned prefab has the original Ifrit
+        // definition baked in (definition is not a SyncVar). This patch runs on all clients
+        // after SyncVars are applied and reassigns the cloned definition if the synced
+        // unitName contains "KR-67X". This ensures IsIfritX() and all mod patches work
+        // correctly on remote clients in multiplayer.
+        [HarmonyPatch(typeof(Aircraft), "OnStartClient")]
+        public static class AircraftClientFixupPatch
+        {
+            private static readonly FieldInfo unitDefField = AccessTools.Field(typeof(Unit), "definition");
+
+            public static void Postfix(Aircraft __instance)
+            {
+                if (clonedDefinition == null || unitDefField == null) return;
+                // Skip if definition is already correct (server/owning client)
+                var currentDef = __instance.definition;
+                if (currentDef == clonedDefinition) return;
+                // Check the network-synced unitName to identify KR-67X on remote clients
+                var syncedName = __instance.unitName;
+                if (syncedName != null &&
+                    syncedName.IndexOf("KR-67X", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    unitDefField.SetValue(__instance, clonedDefinition);
+                    Log.LogInfo("[MP] Fixed KR-67X definition on client for: " + syncedName);
+                }
+            }
+        }
+
         // Prevent flap deployment above Mach 1 on KR-67X
         [HarmonyPatch(typeof(ControlSurface), "UpdateJobFields")]
         public static class FlapSpeedLimitPatch
