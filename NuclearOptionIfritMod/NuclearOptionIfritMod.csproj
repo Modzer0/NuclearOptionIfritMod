@@ -3,6 +3,7 @@
   <PropertyGroup>
     <TargetFramework>net472</TargetFramework>
     <AssemblyName>NuclearOptionIfritMod</AssemblyName>
+    <Version>0.1.3</Version>
     <LangVersion>latest</LangVersion>
   </PropertyGroup>
 
@@ -55,8 +56,14 @@
     </Reference>
   </ItemGroup>
 
+  <!-- Copy unversioned DLL to game plugins folder (BepInEx loads by type, not filename) -->
   <Target Name="CopyToPlugins" AfterTargets="Build">
     <Copy SourceFiles="$(OutputPath)$(AssemblyName).dll" DestinationFolder="$(GameDir)\BepInEx\plugins" />
+  </Target>
+
+  <!-- Copy versioned DLL for release uploads -->
+  <Target Name="CopyVersioned" AfterTargets="Build">
+    <Copy SourceFiles="$(OutputPath)$(AssemblyName).dll" DestinationFiles="$(OutputPath)$(AssemblyName)-v$(Version).dll" />
   </Target>
 
 </Project>
