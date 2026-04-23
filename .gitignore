@@ -10,3 +10,8 @@ decompiled/
 decompiled qol/
 NuclearOptionMods.md
 MissionEditorNotes.md
+NO decompile/
+QOL decompile/
+.kiro/
+.vscode/
+settings.json

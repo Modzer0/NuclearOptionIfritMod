@@ -8,6 +8,8 @@ using System.Reflection;
 using UnityEngine;
 using UnityEngine.UI;
 using NuclearOption.MissionEditorScripts.Buttons;
+using NuclearOption.Networking;
+using NuclearOption.SavedMission;
 
 namespace NuclearOptionIfritMod
 {
@@ -34,12 +36,11 @@ namespace NuclearOptionIfritMod
         internal static AircraftDefinition originalDefinition = null;
         internal static bool nextSpawnIsClone = false;
         internal static BepInEx.Configuration.ConfigEntry<bool> DarkstarMode;
-        internal static BepInEx.Configuration.ConfigEntry<float> ScimitarThrust;
+
         private void Awake()
         {
             Log = Logger;
             DarkstarMode = Config.Bind("General", "Darkstar Mode", false, "Double scramjet thrust when enabled.");
-            ScimitarThrust = Config.Bind("Weapons", "Scimitar Thrust kN", 0f, "Override Scimitar motor thrust in kN. 0 = stock, 5000 = 5000kN.");
             var harmony = new Harmony("com.custom.ifritmod");
             harmony.PatchAll();
             try
@@ -505,10 +506,10 @@ namespace NuclearOptionIfritMod
             }
         }
 
-        [HarmonyPatch(typeof(Hangar), "TrySpawnAircraft")]
+        [HarmonyPatch(typeof(Hangar), "TrySpawnAircraft", new Type[] { typeof(Player), typeof(AircraftDefinition), typeof(LiveryKey), typeof(Loadout), typeof(float) })]
         public static class HangarTrySpawnFlagPatch
         {
-            public static void Prefix(AircraftDefinition definition)
+            public static void Prefix(Player player, AircraftDefinition definition, LiveryKey livery, Loadout loadout, float fuelLevel)
             {
                 if (clonedDefinition != null && definition == clonedDefinition)
                 {
@@ -518,7 +519,7 @@ namespace NuclearOptionIfritMod
             }
         }
 
-        [HarmonyPatch(typeof(Spawner), "SpawnAircraft")]
+        [HarmonyPatch(typeof(Spawner), "SpawnAircraft", new Type[] { typeof(Player), typeof(GameObject), typeof(Loadout), typeof(float), typeof(LiveryKey), typeof(GlobalPosition), typeof(Quaternion), typeof(Vector3), typeof(Hangar), typeof(FactionHQ), typeof(string), typeof(float), typeof(float) })]
         public static class SpawnerSpawnAircraftPatch
         {
             private static readonly FieldInfo unitDefField = AccessTools.Field(typeof(Unit), "definition");
@@ -599,7 +600,7 @@ namespace NuclearOptionIfritMod
         {
             private static readonly FieldInfo rscCanardField = AccessTools.Field(typeof(RelaxedStabilityController), "canardRange");
 
-            public static void Prefix(RelaxedStabilityController __instance, ControlInputs inputs, Rigidbody rb, ref float rawPitch)
+            public static void Prefix(RelaxedStabilityController __instance, ControlInputs inputs, Rigidbody rb, float gForce, float rawPitch)
             {
                 // Get the aircraft from the rigidbody's parent
                 var aircraft = rb.GetComponent<Aircraft>();
@@ -620,7 +621,7 @@ namespace NuclearOptionIfritMod
                 }
             }
 
-            public static void Postfix(RelaxedStabilityController __instance, Rigidbody rb)
+            public static void Postfix(RelaxedStabilityController __instance, Rigidbody rb, float gForce, float rawPitch)
             {
                 var aircraft = rb.GetComponent<Aircraft>();
                 if (aircraft == null || !IsIfritX(aircraft)) return;
@@ -644,10 +645,10 @@ namespace NuclearOptionIfritMod
         // Dampen FlyByWire pitch response at hypersonic speeds to prevent oscillations
         // The FBW uses speed * airDensity / 1.225 as effective speed, which is low at altitude
         // but actual aero forces (density * speed^2) are still huge at hypersonic speeds
-        [HarmonyPatch(typeof(ControlsFilter), "Filter")]
+        [HarmonyPatch(typeof(ControlsFilter), "Filter", new Type[] { typeof(ControlInputs), typeof(Vector3), typeof(Rigidbody), typeof(float), typeof(bool) })]
         public static class FBWHypersonicDamperPatch
         {
-            public static void Postfix(ControlInputs inputs, Vector3 rawInputs, Rigidbody rb)
+            public static void Postfix(ControlInputs inputs, Vector3 rawInputs, Rigidbody rb, float gForce, bool flightAssist)
             {
                 var aircraft = rb.GetComponent<Aircraft>();
                 if (aircraft == null || !IsIfritX(aircraft)) return;
@@ -718,40 +719,7 @@ namespace NuclearOptionIfritMod
                 // but with infinite joint strength, the airbrake will hold.
             }
         }
-        // Override Scimitar missile motor thrust if configured
-        [HarmonyPatch(typeof(Missile), "MotorThrust")]
-        public static class ScimitarThrustPatch
-        {
-            private static readonly FieldInfo missileInfoField = AccessTools.Field(typeof(Missile), "info");
-            private static readonly FieldInfo missileMotorsField = AccessTools.Field(typeof(Missile), "motors");
-            private static readonly Type motorType = typeof(Missile).GetNestedType("Motor", BindingFlags.NonPublic);
-            private static readonly FieldInfo motorThrustField = motorType != null ? AccessTools.Field(motorType, "thrust") : null;
-            private static readonly HashSet<int> patched = new HashSet<int>();
 
-            public static void Prefix(Missile __instance)
-            {
-                if (ScimitarThrust == null || ScimitarThrust.Value <= 0f) return;
-                int id = __instance.GetInstanceID();
-                if (patched.Contains(id)) return;
-
-                var info = missileInfoField?.GetValue(__instance) as WeaponInfo;
-                if (info == null || info.weaponName == null) return;
-                if (info.weaponName.IndexOf("Scimitar", StringComparison.OrdinalIgnoreCase) < 0 && info.weaponName.IndexOf("AAM-36", StringComparison.OrdinalIgnoreCase) < 0) return;
-
-                if (missileMotorsField == null || motorThrustField == null) return;
-                var motors = missileMotorsField.GetValue(__instance) as Array;
-                if (motors == null) return;
-
-                float thrustN = ScimitarThrust.Value * 1000f; // config is in kN
-                foreach (var motor in motors)
-                {
-                    float old = (float)motorThrustField.GetValue(motor);
-                    motorThrustField.SetValue(motor, thrustN);
-                    Log.LogInfo("[Scimitar] Motor thrust: " + old + " -> " + thrustN + "N");
-                }
-                patched.Add(id);
-            }
-        }
         // Inject KR-67X into mission editor by clearing the static unit provider cache
         // so NewUnitPanel rebuilds it with our clone included from Encyclopedia.aircraft
         [HarmonyPatch(typeof(NewUnitPanel), "Awake")]
@@ -787,60 +755,7 @@ namespace NuclearOptionIfritMod
             }
         }
 
-        // Scale Scimitar missile torque and maxTurnRate when thrust is overridden
-        // so the missile can still track targets at much higher speeds
-        [HarmonyPatch(typeof(Missile), "StartMissile")]
-        public static class ScimitarGuidancePatch
-        {
-            private static readonly FieldInfo missileInfoField = AccessTools.Field(typeof(Missile), "info");
-            private static readonly FieldInfo missileTorqueField = AccessTools.Field(typeof(Missile), "torque");
-            private static readonly FieldInfo missileMaxTurnField = AccessTools.Field(typeof(Missile), "maxTurnRate");
-            private static readonly FieldInfo missileMotorsField = AccessTools.Field(typeof(Missile), "motors");
-            private static readonly Type motorType = typeof(Missile).GetNestedType("Motor", BindingFlags.NonPublic);
-            private static readonly FieldInfo motorThrustField = motorType != null ? AccessTools.Field(motorType, "thrust") : null;
 
-            public static void Postfix(Missile __instance)
-            {
-                if (ScimitarThrust == null || ScimitarThrust.Value <= 0f) return;
-
-                var info = missileInfoField?.GetValue(__instance) as WeaponInfo;
-                if (info == null || info.weaponName == null) return;
-                if (info.weaponName.IndexOf("Scimitar", StringComparison.OrdinalIgnoreCase) < 0
-                    && info.weaponName.IndexOf("AAM-36", StringComparison.OrdinalIgnoreCase) < 0) return;
-
-                // Calculate thrust ratio to scale guidance proportionally
-                float targetThrustN = ScimitarThrust.Value * 1000f;
-                if (missileMotorsField == null || motorThrustField == null) return;
-                var motors = missileMotorsField.GetValue(__instance) as Array;
-                if (motors == null || motors.Length == 0) return;
-                float stockThrust = (float)motorThrustField.GetValue(motors.GetValue(0));
-                if (stockThrust <= 0f) stockThrust = 1f;
-                float thrustRatio = targetThrustN / stockThrust;
-
-                // Scale torque by sqrt of thrust ratio — more torque for faster turning
-                // but not linearly, since aero forces also help at higher speed
-                if (missileTorqueField != null)
-                {
-                    float oldTorque = (float)missileTorqueField.GetValue(__instance);
-                    float newTorque = oldTorque * Mathf.Sqrt(thrustRatio);
-                    missileTorqueField.SetValue(__instance, newTorque);
-                    Log.LogInfo("[Scimitar] Torque: " + oldTorque + " -> " + newTorque);
-                }
-
-                // Scale maxTurnRate — allow wider PID steering commands
-                if (missileMaxTurnField != null)
-                {
-                    float oldRate = (float)missileMaxTurnField.GetValue(__instance);
-                    float newRate = oldRate * Mathf.Sqrt(thrustRatio);
-                    missileMaxTurnField.SetValue(__instance, newRate);
-                    // Also update the PID pLimit which was set from maxTurnRate in StartMissile
-                    __instance.SetTorque(
-                        (float)missileTorqueField.GetValue(__instance),
-                        newRate);
-                    Log.LogInfo("[Scimitar] MaxTurnRate: " + oldRate + " -> " + newRate);
-                }
-            }
-        }
         // Double radar range on KR-67X
         [HarmonyPatch(typeof(Radar), "Awake")]
         public static class RadarRangePatch
