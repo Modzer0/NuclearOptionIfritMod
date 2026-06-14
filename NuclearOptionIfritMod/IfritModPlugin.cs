@@ -31,7 +31,7 @@ namespace NuclearOptionIfritMod
         internal const string CloneJsonKey = "Multirole1X";
         internal const string CloneUnitName = "KR-67X SuperIfrit";
         internal const string CloneAircraftName = "KR-67X";
-        internal const float CloneCostMillions = 1000f;
+        internal const float CloneCostMillions = 0.6f;
         internal static AircraftDefinition clonedDefinition = null;
         internal static AircraftDefinition originalDefinition = null;
         internal static bool nextSpawnIsClone = false;
